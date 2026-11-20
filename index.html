@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Page</title>
+<style>
+  :root { color-scheme: light; box-sizing: border-box; padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
+  html { scroll-padding-top: env(safe-area-inset-top, 0px); }
+  html, body { height: 100%; margin: 0; background: #fff; color: #000; }
+  body { font-family: "Hiragino Mincho ProN", "Yu Mincho", "YuMincho", "MS PMincho", "Noto Serif JP", serif; }
+  .view { height: 100%; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 24px; padding: 24px; box-sizing: border-box; text-align: center; }
+  .view.active { display: flex; }
+  h1 { font-size: 1.6rem; font-weight: 400; margin: 0; word-break: break-all; letter-spacing: 0.05em; }
+  input { font: inherit; font-size: 1rem; width: min(320px, 90%); padding: 8px 10px; border: none; border-radius: 0; background: #fff; color: #000; outline: none; text-align: center; }
+
+  /* タイプライター表示：完成形の幅を最初から確保し、打った文字がその場に現れるようにする */
+  .typewriter { white-space: pre-wrap; }
+  #next h1 { text-align: left; }                     /* 遷移先の文章は左揃え */
+  .c { position: relative; display: inline-block; text-align: center; }  /* 幅は完成形で測って固定する */
+  .c.p { visibility: hidden; }                       /* まだ出ていない文字（幅だけ確保） */
+  .c.s { color: transparent; }                       /* スクランブル中：本来の文字は隠して… */
+  .c.s::before {                                     /* …代わりにランダムな文字を同じ位置に重ねる */
+    content: attr(data-s);
+    position: absolute; left: 0; right: 0;
+    text-align: center; color: #000;
+  }
+  /* 打っている最中だけ出る横棒カーソル（疑似要素なので文字の配置に影響しない） */
+  .c.last::after, .c.pre::after {
+    content: "";
+    position: absolute; bottom: 0.05em;
+    width: 0.6em; height: 2px; background: #000;
+    visibility: visible;
+    animation: blink 0.8s step-end infinite;
+  }
+  .c.last::after { left: 100%; margin-left: 3px; }   /* いま打っている文字の右 */
+  .c.pre::after  { right: 100%; margin-right: 3px; } /* 開始前は先頭の左 */
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* 行ごとに「ぱっ」と出す表示：全行を不可視で並べておき、順に見せる */
+  .ln { display: block; }
+  .ln.p { visibility: hidden; }
+</style>
+</head>
+<body>
+<main id="home" class="view active">
+  <h1 class="typewriter" data-sound data-text='∴∠◆⊥∪("▼☆◉◉∞, ⊆∞∠◉◇!")'></h1>
+  <input id="field" type="text" lang="en" inputmode="latin" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="input">
+</main>
+<main id="next" class="view">
+  <h1 class="typewriter" data-mode="lines" data-text="正しい物はただ一つ<br>場所を知っても方法は分からない<br>方法を知っても場所は分からない<br>それが分かるなら場所のみで方法は示される<br>それも分かるなら方法のみで場所が示される"></h1>
+</main>
+<script>
+(function () {
+  var home = document.getElementById('home');
+  var next = document.getElementById('next');
+  var field = document.getElementById('field');
+  var composing = false;
+  var pending = false;
+  var DELAY_MS = 1000; // 正解してから遷移するまでの猶予
+
+  // ---- 打鍵音（Web Audioでノイズを叩いて「カタッ」という機械音を合成） ----
+  var audioCtx = null;
+  function getAudio() {
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+    return audioCtx;
+  }
+  function playClack(freq, dur, gainValue) {
+    try {
+      var ctx = getAudio();
+      // 自動再生が許可される前に鳴らすと、あとで溜まった音が一斉に出てしまうので鳴らさない
+      if (!ctx || ctx.state !== 'running') return;
+      var size = Math.max(1, Math.floor(ctx.sampleRate * dur));
+      var buffer = ctx.createBuffer(1, size, ctx.sampleRate);
+      var data = buffer.getChannelData(0);
+      for (var i = 0; i < size; i++) data[i] = Math.random() * 2 - 1;
+      var noise = ctx.createBufferSource();
+      noise.buffer = buffer;
+      var filter = ctx.createBiquadFilter();
+      filter.type = 'bandpass';
+      filter.frequency.value = freq;
+      filter.Q.value = 1.2;
+      var gain = ctx.createGain();
+      gain.gain.setValueAtTime(gainValue, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + dur);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+      noise.start();
+      noise.stop(ctx.currentTime + dur);
+    } catch (e) { /* 再生できない環境は無視 */ }
+  }
+  function clickSoft() { playClack(2600 + Math.random() * 800, 0.018, 0.05); } // スクランブル中の細かい音
+  function clickHard() { playClack(1500 + Math.random() * 400, 0.03, 0.14); }  // 文字確定の「カタッ」
+
+  // ブラウザは最初の操作があるまで音を止めるので、操作されたら再生を許可する
+  ['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) {
+    window.addEventListener(ev, function () {
+      var c = getAudio();
+      if (c && c.state === 'suspended') c.resume();
+    }, { passive: true });
+  });
+
+  // ---- タイプライター表示（スクランブル演出） ----
+  var FRAME_MS = 55;    // 1コマの長さ（大きいほどゆっくり）
+  var PRELUDE_MS = 600; // 表示が始まってから最初の一文字が動き出すまでの余韻
+  var SCRAMBLE = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+
+  function isSpace(ch) { return /\s/.test(ch); }
+  function escapeHtml(s) { return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  // data-text 内の <br> を改行として扱い、それ以外は1文字ずつのトークンに分解する
+  function tokenize(text) {
+    var tokens = [];
+    var brRe = /<br\s*\/?>/gi;
+    var lastIndex = 0, m;
+    function pushChars(str) {
+      Array.from(str).forEach(function (ch) {
+        tokens.push({ type: isSpace(ch) ? 'space' : 'char', ch: ch });
+      });
+    }
+    while ((m = brRe.exec(text))) {
+      pushChars(text.slice(lastIndex, m.index));
+      tokens.push({ type: 'br' });
+      lastIndex = brRe.lastIndex;
+    }
+    pushChars(text.slice(lastIndex));
+    return tokens;
+  }
+
+  function stopTyping(el) {
+    if (el && el._timer) clearTimeout(el._timer);
+  }
+
+  // 全トークンを常に並べておく（未出現は不可視）ので、レイアウトは最初から完成形と同じ
+  function render(el, queue, frame, withCursor) {
+    // カーソルを付ける文字：いちばん最後に出現した文字。まだ何も出ていなければ先頭の文字（その左）
+    var curIdx = -1, preIdx = -1;
+    queue.forEach(function (q, i) { if (q.type !== 'br' && frame >= q.start) curIdx = i; });
+    if (curIdx === -1) preIdx = queue.findIndex(function (q) { return q.type !== 'br'; });
+
+    var html = '';
+    queue.forEach(function (q, i) {
+      if (q.type === 'br') { html += '<br>'; return; }
+      var ch = escapeHtml(q.ch);
+      var cls = 'c';
+      var attr = '';
+      if (frame < q.start) cls += ' p';
+      else if (frame < q.end) {
+        cls += ' s';
+        attr = ' data-s="' + SCRAMBLE[Math.floor(Math.random() * SCRAMBLE.length)] + '"';
+      }
+      if (withCursor && i === curIdx) cls += ' last';
+      if (withCursor && i === preIdx) cls += ' pre';
+      var style = q.w ? ' style="width:' + q.w + 'px"' : '';
+      html += '<span class="' + cls + '"' + attr + style + '>' + ch + '</span>';
+    });
+    el.innerHTML = html;
+  }
+
+  // 行ごとに「ぱっ」と現れる表示（data-mode="lines"）
+  var LINE_MS = 1000; // 行が出る間隔
+  function startLines(el) {
+    var lines = (el.getAttribute('data-text') || '').split(/<br\s*\/?>/i);
+    var shown = 0;
+    function paint() {
+      el.innerHTML = lines.map(function (t, i) {
+        return '<span class="ln' + (i < shown ? '' : ' p') + '">' + (t === '' ? '&nbsp;' : escapeHtml(t)) + '</span>';
+      }).join('');
+    }
+    function step() {
+      shown++;
+      paint();
+      if (shown < lines.length) el._timer = setTimeout(step, LINE_MS);
+    }
+    paint();                                  // 全行を不可視で並べて場所だけ確保
+    el._timer = setTimeout(step, PRELUDE_MS); // 余韻のあと、1行目がぱっと出る
+  }
+
+  function startTyping(el) {
+    if (!el) return;
+    stopTyping(el);
+    if (el.getAttribute('data-mode') === 'lines') { startLines(el); return; }
+    var sound = el.hasAttribute('data-sound');
+    if (sound) { var c0 = getAudio(); if (c0 && c0.state === 'suspended') { try { c0.resume(); } catch (e) {} } }
+
+    // 空白と<br>はスクランブルさせず、順番が来たら即座に確定する
+    // 改行のあとは、直前の行を打ち終えてから約1秒待って次の行を始める
+    var BR_PAUSE = Math.round(1000 / FRAME_MS);
+    var cursor = 0, maxEnd = 0, afterBr = false;
+    var queue = tokenize(el.getAttribute('data-text') || '').map(function (tok) {
+      var start = cursor;
+      if (afterBr) { start = Math.max(start, maxEnd + BR_PAUSE); afterBr = false; }
+      var end = tok.type === 'char' ? start + 9 + Math.floor(Math.random() * 6) : start;
+      maxEnd = Math.max(maxEnd, end);
+      cursor = start + 5;
+      if (tok.type === 'br') afterBr = true;
+      return { type: tok.type, ch: tok.ch, start: start, end: end };
+    });
+
+    // 完成形で各文字の幅を一度測って固定する（スクランブル中に幅が変わって全体が揺れるのを防ぐ）
+    render(el, queue, Infinity, false);
+    var spans = el.querySelectorAll('.c'), k = 0;
+    queue.forEach(function (q) { if (q.type !== 'br') q.w = spans[k++].getBoundingClientRect().width; });
+
+    var frame = 0;
+    var lastSoft = -2;
+
+    function tick() {
+      var done = queue.every(function (q) { return frame >= q.end; });
+      render(el, queue, frame, !done);                // 全部打ち終わったらカーソルを消す
+      if (sound) {
+        // 空白・改行はスクランブルも確定音もないので無音
+        var scrambling = queue.some(function (q) { return q.type === 'char' && frame >= q.start && frame < q.end; });
+        if (scrambling && frame - lastSoft >= 2) { clickSoft(); lastSoft = frame; }
+        queue.forEach(function (q) { if (q.type === 'char' && frame === q.end) clickHard(); });
+      }
+      frame++;
+      if (!done) el._timer = setTimeout(tick, FRAME_MS);
+    }
+
+    render(el, queue, -1, true);                       // 開始前の余韻の間はカーソルだけ点滅
+    el._timer = setTimeout(tick, PRELUDE_MS);
+  }
+
+  function route() {
+    var isNext = location.hash === '#test';
+    home.classList.toggle('active', !isNext);
+    next.classList.toggle('active', isNext);
+    stopTyping((isNext ? home : next).querySelector('.typewriter'));
+    startTyping((isNext ? next : home).querySelector('.typewriter'));
+    if (!isNext) { pending = false; field.readOnly = false; field.value = ''; field.focus(); }
+  }
+
+  function clean() {
+    var v = field.value.replace(/[^\x20-\x7E]/g, '');
+    if (v !== field.value) field.value = v;
+  }
+
+  function matches() {
+    // 表記ゆれを許容: 大文字小文字・空白・記号の有無/違いを無視
+    return field.value.toLowerCase().replace(/[^a-z]/g, '') === 'helloworld';
+  }
+
+  function check() {
+    if (pending || !matches()) return;
+    pending = true;
+    field.readOnly = true;
+    setTimeout(function () { location.hash = 'test'; }, DELAY_MS);
+  }
+
+  field.addEventListener('compositionstart', function () { composing = true; });
+  field.addEventListener('compositionend', function () { composing = false; clean(); check(); });
+  field.addEventListener('input', function () {
+    if (composing) return;
+    clean();
+    check();
+  });
+  field.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !composing) check();
+  });
+  window.addEventListener('hashchange', route);
+  route();
+})();
+</script>
+</body>
+</html>
